@@ -2,13 +2,25 @@ import { GoogleGenAI } from "@google/genai";
 import { ChatMessage } from "../types";
 
 export class GeminiService {
-  private ai: GoogleGenAI;
+  private ai: GoogleGenAI | null = null;
 
   constructor() {
-    this.ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
+    try {
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (apiKey) {
+        this.ai = new GoogleGenAI({ apiKey });
+      } else {
+        console.warn("GEMINI_API_KEY is not set. AI Chat will be disabled.");
+      }
+    } catch (error) {
+      console.error("Failed to initialize Gemini AI:", error);
+    }
   }
 
   async askQuestion(question: string, history: ChatMessage[]) {
+    if (!this.ai) {
+      return "I'm sorry, the AI assistant is currently unavailable. Please contact us directly for assistance.";
+    }
     try {
       const response = await this.ai.models.generateContent({
         model: "gemini-3-flash-preview",
