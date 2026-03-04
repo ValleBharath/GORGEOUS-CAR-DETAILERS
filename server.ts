@@ -1,33 +1,11 @@
 import express from "express";
-import Database from "better-sqlite3";
 import path from "path";
 import fs from "fs";
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
 
-const db = new Database("detailers.db");
-
-// Initialize database
-db.exec(`
-  CREATE TABLE IF NOT EXISTS leads (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    email TEXT NOT NULL,
-    phone TEXT,
-    car_model TEXT,
-    service TEXT,
-    message TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-  
-  CREATE TABLE IF NOT EXISTS bookings (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    email TEXT NOT NULL,
-    date TEXT NOT NULL,
-    time TEXT NOT NULL,
-    service TEXT NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-`);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 async function startServer() {
   const app = express();
@@ -35,15 +13,82 @@ async function startServer() {
 
   app.use(express.json());
 
+  // Request logging for debugging
+  app.use((req, res, next) => {
+    if (req.url.startsWith('/api')) {
+      console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
+    }
+    next();
+  });
+
+  // Lazy load database to prevent crash on startup in environments like Vercel
+  let db: any;
+  try {
+    const Database = (await import("better-sqlite3")).default;
+    const dbPath = path.resolve(__dirname, "detailers.db");
+    db = new Database(dbPath);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS leads (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        email TEXT NOT NULL,
+        phone TEXT,
+        car_model TEXT,
+        service TEXT,
+        message TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+      
+      CREATE TABLE IF NOT EXISTS bookings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        email TEXT NOT NULL,
+        date TEXT NOT NULL,
+        time TEXT NOT NULL,
+        service TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log(`Database initialized at ${dbPath}`);
+  } catch (error) {
+    console.error("Database initialization failed (falling back to memory-only mode):", error);
+  }
+
   // API Routes
+  app.get("/api/health", (req, res) => {
+    res.json({ 
+      status: "ok", 
+      database: !!db, 
+      env: process.env.NODE_ENV,
+      cwd: process.cwd(),
+      dirname: __dirname,
+      distExists: fs.existsSync(path.resolve(__dirname, "dist"))
+    });
+  });
+
+  app.get("/api/debug", (req, res) => {
+    const distPath = path.resolve(__dirname, "dist");
+    const files = fs.existsSync(distPath) ? fs.readdirSync(distPath) : [];
+    res.json({
+      env: process.env,
+      distPath,
+      distFiles: files,
+      cwd: process.cwd(),
+      dirname: __dirname
+    });
+  });
+
   app.post("/api/leads", async (req, res) => {
     const { name, email, phone, carModel, service, message } = req.body;
     try {
-      // Save to local database
-      const stmt = db.prepare(
-        "INSERT INTO leads (name, email, phone, car_model, service, message) VALUES (?, ?, ?, ?, ?, ?)"
-      );
-      stmt.run(name, email, phone, carModel, service, message);
+      if (db) {
+        const stmt = db.prepare(
+          "INSERT INTO leads (name, email, phone, car_model, service, message) VALUES (?, ?, ?, ?, ?, ?)"
+        );
+        stmt.run(name, email, phone, carModel, service, message);
+      } else {
+        console.warn("Lead received but database is unavailable:", { name, email });
+      }
 
       // Forward to Google Sheets if URL is configured
       const scriptUrl = process.env.GOOGLE_APPS_SCRIPT_URL;
@@ -79,11 +124,14 @@ async function startServer() {
   app.post("/api/bookings", async (req, res) => {
     const { name, email, date, time, service } = req.body;
     try {
-      // Save to local database
-      const stmt = db.prepare(
-        "INSERT INTO bookings (name, email, date, time, service) VALUES (?, ?, ?, ?, ?)"
-      );
-      stmt.run(name, email, date, time, service);
+      if (db) {
+        const stmt = db.prepare(
+          "INSERT INTO bookings (name, email, date, time, service) VALUES (?, ?, ?, ?, ?)"
+        );
+        stmt.run(name, email, date, time, service);
+      } else {
+        console.warn("Booking received but database is unavailable:", { name, email });
+      }
 
       // Forward to Google Sheets if URL is configured
       const scriptUrl = process.env.GOOGLE_APPS_SCRIPT_URL;
@@ -118,9 +166,15 @@ async function startServer() {
   });
 
   // Vite middleware for development
-  const isProduction = process.env.NODE_ENV === "production" || fs.existsSync(path.join(process.cwd(), "dist"));
+  const distPath = path.resolve(__dirname, "dist");
+  const isProduction = process.env.NODE_ENV === "production" || fs.existsSync(distPath);
+
+  console.log(`[Server] Mode: ${isProduction ? 'Production' : 'Development'}`);
+  console.log(`[Server] Dist path: ${distPath}`);
+  console.log(`[Server] Dist exists: ${fs.existsSync(distPath)}`);
 
   if (!isProduction) {
+    console.log("[Server] Starting Vite in middleware mode...");
     const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -128,10 +182,16 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), "dist");
+    console.log("[Server] Serving static files from dist...");
     app.use(express.static(distPath));
     app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
+      const indexPath = path.join(distPath, "index.html");
+      if (fs.existsSync(indexPath)) {
+        res.sendFile(indexPath);
+      } else {
+        console.error(`[Server] Error: index.html not found at ${indexPath}`);
+        res.status(404).send(`Production build not found. Please ensure 'npm run build' was executed.`);
+      }
     });
   }
 
